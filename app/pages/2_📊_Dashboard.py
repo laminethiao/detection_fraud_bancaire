@@ -2,33 +2,16 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import joblib
 import os
 import requests
 from utils.data_loader import load_data
 from utils.ui_style import setup_page_config, load_css, create_footer, create_header
-
 from utils.auth import check_authentication
 
 check_authentication()
 
 # URL de l'API FastAPI
 API_URL = "https://detection-fraud-bancaire.fly.dev"
-
-@st.cache_resource
-def load_resources():
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.join(current_dir, "..")
-    model_path = os.path.join(parent_dir, "models", "xgb_fraud_detection_model.pkl")
-    scaler_path = os.path.join(parent_dir, "models", "scaler.pkl")
-
-    try:
-        model = joblib.load(model_path)
-        scaler = joblib.load(scaler_path)
-        return model, scaler
-    except FileNotFoundError as e:
-        st.error(f"Erreur : Un des fichiers du modèle n'a pas été trouvé. Veuillez vérifier le chemin. {e}")
-        return None, None
 
 @st.cache_data
 def get_data():
@@ -52,8 +35,22 @@ def get_feedback_data():
         st.error(f"Impossible de se connecter à l'API : {e}. Assurez-vous que l'API est en cours d'exécution.")
         return pd.DataFrame()
 
-def show():
+def predict_transaction_api(transaction_data):
+    """
+    Prédit si une transaction est frauduleuse via l'API.
+    """
+    try:
+        response = requests.post(f"{API_URL}/predict", json=transaction_data)
+        if response.status_code == 200:
+            return response.json()['prediction']
+        else:
+            st.error(f"Erreur API: {response.status_code}")
+            return 0
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erreur de connexion à l'API: {e}")
+        return 0
 
+def show():
     load_css()
     create_footer()
 
@@ -97,37 +94,52 @@ def show():
         (filtered_df['Hour'] <= hour_range[1])
         ]
 
-    # --- PRÉDICTION SUR LES DONNÉES FILTRÉES ---
-    model, scaler = load_resources()
-
-    if model is None or scaler is None:
-        st.error("Les ressources du modèle n'ont pas pu être chargées. Contactez l'administrateur.")
-    elif filtered_df.empty:
+    # --- PRÉDICTION SUR LES DONNÉES FILTRÉES VIA L'API ---
+    if filtered_df.empty:
         st.warning("Aucune transaction ne correspond à vos filtres. Veuillez ajuster les critères de recherche.")
         filtered_df['Predicted_Class'] = 0
     else:
         try:
-            # Créer une copie du DataFrame pour ne pas modifier l'original
-            features = filtered_df.copy()
-
-            # Normaliser les variables 'Time' et 'Amount' ENSEMBLE
-            features_to_scale = ['Time', 'Amount']
-            features[features_to_scale] = scaler.transform(features[features_to_scale])
-
-            # Créer la fonctionnalité 'Amount_Category' si le modèle l'attend
-            if 'Amount_Category' in model.feature_names_in_:
-                bins = [0, 50, 100, 500, float('inf')]
-                labels = [0, 1, 2, 3]
-                features['Amount_Category'] = pd.cut(features['Amount'], bins=bins, labels=labels, right=False).astype(int)
-
-            # S'assurer que les colonnes sont dans le bon ordre avant de faire la prédiction
-            final_features = features[list(model.feature_names_in_)]
-
-            # Faire la prédiction
-            predictions = model.predict(final_features)
+            # Utiliser l'API pour les prédictions
+            predictions = []
+            
+            # Barre de progression
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            total_rows = len(filtered_df)
+            for i, (_, row) in enumerate(filtered_df.iterrows()):
+                # Mettre à jour la progression
+                progress = (i + 1) / total_rows
+                progress_bar.progress(progress)
+                status_text.text(f"Prédiction en cours... {i+1}/{total_rows}")
+                
+                # Préparer les données pour l'API
+                transaction_data = {
+                    "Time": float(row['Time']),
+                    "V1": float(row['V1']), "V2": float(row['V2']), "V3": float(row['V3']), "V4": float(row['V4']),
+                    "V5": float(row['V5']), "V6": float(row['V6']), "V7": float(row['V7']), "V8": float(row['V8']),
+                    "V9": float(row['V9']), "V10": float(row['V10']), "V11": float(row['V11']), "V12": float(row['V12']),
+                    "V13": float(row['V13']), "V14": float(row['V14']), "V15": float(row['V15']), "V16": float(row['V16']),
+                    "V17": float(row['V17']), "V18": float(row['V18']), "V19": float(row['V19']), "V20": float(row['V20']),
+                    "V21": float(row['V21']), "V22": float(row['V22']), "V23": float(row['V23']), "V24": float(row['V24']),
+                    "V25": float(row['V25']), "V26": float(row['V26']), "V27": float(row['V27']), "V28": float(row['V28']),
+                    "Amount": float(row['Amount'])
+                }
+                
+                # Appel à l'API
+                prediction = predict_transaction_api(transaction_data)
+                predictions.append(prediction)
+            
+            # Nettoyer la barre de progression
+            progress_bar.empty()
+            status_text.empty()
+            
             filtered_df['Predicted_Class'] = predictions
+            st.success("✅ Prédictions terminées avec succès !")
+            
         except Exception as e:
-            st.error(f"Une erreur s'est produite lors de la prédiction du modèle. Erreur: {e}")
+            st.error(f"Erreur lors de l'appel à l'API : {e}")
             filtered_df['Predicted_Class'] = 0
 
     # --- AFFICHAGE DES KPIS ET VISUALISATIONS ---
@@ -220,7 +232,7 @@ def show():
             )
 
         with col_data:
-            st.markdown("#### Télécharger les Données Filtrées")
+            st.markdown("◆ Télécharger les Données Filtrées")
             st.info("Aperçu des 10 premières lignes. Le fichier CSV complet contient toutes les transactions filtrées.")
             st.dataframe(filtered_df.head(10), use_container_width=True)
             csv_data = filtered_df.to_csv(index=False).encode('utf-8')

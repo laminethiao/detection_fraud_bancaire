@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import requests
@@ -10,16 +9,12 @@ import numpy as np
 
 # Import des fonctions de style à partir d'un autre fichier
 from utils.ui_style import setup_page_config, load_css, create_footer, apply_button_style
-
 from utils.auth import check_authentication
-
-
 
 check_authentication()
 
 # URL de l'API FastAPI
 API_URL = "https://detection-fraud-bancaire.fly.dev"
-
 
 @st.cache_data(ttl=5)
 def get_model_alerts():
@@ -28,7 +23,7 @@ def get_model_alerts():
     La fonction est mise en cache pour 5 secondes pour un rafraîchissement régulier.
     """
     try:
-        response = requests.get(f"{API_URL}/alerts")
+        response = requests.get(f"{API_URL}/alerts", timeout=10)
         if response.status_code == 200:
             alerts_data = response.json()['alerts']
             if not alerts_data:
@@ -40,9 +35,8 @@ def get_model_alerts():
             st.error(f"Erreur lors de la récupération des alertes : {response.status_code}")
             return pd.DataFrame()
     except requests.exceptions.RequestException as e:
-        st.error(f"Impossible de se connecter à l'API. Assurez-vous que l'API est en cours d'exécution.")
+        st.error(f"Impossible de se connecter à l'API : {e}")
         return pd.DataFrame()
-
 
 @st.cache_data
 def get_historical_data():
@@ -65,7 +59,6 @@ def get_historical_data():
     else:
         st.error(f"Erreur : Impossible de trouver le fichier '{file_path}' localement.")
         return pd.DataFrame()
-
 
 def find_most_anomalous_feature(current_transaction, historical_df):
     """
@@ -92,7 +85,6 @@ def find_most_anomalous_feature(current_transaction, historical_df):
         return most_anomalous_feature, anomalies[most_anomalous_feature]
     else:
         return 'V1', 0.0
-
 
 def create_pca_plot(df, current_transaction, feature):
     """Crée un graphique de distribution pour une valeur PCA."""
@@ -150,6 +142,20 @@ def create_pca_plot(df, current_transaction, feature):
     fig.update_traces(marker_line_width=1, marker_line_color="white")
     st.plotly_chart(fig, use_container_width=True)
 
+def submit_feedback(feedback_data):
+    """
+    Soumet une rétroaction à l'API.
+    """
+    try:
+        response = requests.post(f"{API_URL}/feedback", json=feedback_data, timeout=10)
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"Erreur lors de l'envoi de la rétroaction: {response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erreur de connexion à l'API: {e}")
+        return False
 
 def send_feedback(transaction_id, transaction_data, true_class, message):
     """
@@ -159,8 +165,7 @@ def send_feedback(transaction_id, transaction_data, true_class, message):
         feedback_data = transaction_data.to_dict()
         feedback_data['Class'] = true_class
 
-        response = requests.post(f"{API_URL}/feedback", json=feedback_data)
-        if response.status_code == 200:
+        if submit_feedback(feedback_data):
             st.success(message)
             time.sleep(2)
             if 'alerts_queue' in st.session_state and st.session_state.alerts_queue:
@@ -168,17 +173,12 @@ def send_feedback(transaction_id, transaction_data, true_class, message):
             st.cache_data.clear()
             st.rerun()
         else:
-            st.error(f"Échec de l'enregistrement de la rétroaction : {response.status_code}")
-            st.error(response.text)
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erreur lors de l'envoi de la rétroaction à l'API : {e}")
-
-
-# ... (Imports et fonctions utilitaires comme get_model_alerts, get_historical_data, send_feedback, etc., sont inchangés) ...
+            st.error("Échec de l'enregistrement de la rétroaction")
+    except Exception as e:
+        st.error(f"Erreur lors de l'envoi de la rétroaction : {e}")
 
 def show():
     """Affiche la page des alertes en temps réel avec des améliorations interactives."""
-    # setup_page_config()
     load_css()
     apply_button_style()
     create_footer()
@@ -187,6 +187,14 @@ def show():
     st.markdown(
         "Bienvenue dans votre file d'attente d'alertes. Validez les transactions suspectes une par une pour les retirer de la liste.")
     st.markdown("---")
+
+    # Test de connexion à l'API
+    try:
+        health_response = requests.get(f"{API_URL}/health", timeout=5)
+        if health_response.status_code != 200:
+            st.error("⚠️ L'API n'est pas accessible. Vérifiez que le serveur est en cours d'exécution.")
+    except:
+        st.error("⚠️ Impossible de se connecter à l'API. Vérifiez votre connexion.")
 
     # --- Gestion de la file d'attente ---
     if 'alerts_queue' not in st.session_state:
@@ -216,7 +224,7 @@ def show():
         model_verdict = 1 if z_score > 3 else 0  # Maintien de la logique de verdict
 
         # --- Affichage des informations clés ---
-        st.markdown('<div class="card">', unsafe_allow_html=True)  # Utilisation de la classe .card de ui_style.py
+        st.markdown('<div class="card">', unsafe_allow_html=True)
 
         col_info_1, col_info_2, col_info_3 = st.columns([1.5, 1, 3])
 
@@ -242,7 +250,7 @@ def show():
                     </div>
                 """, unsafe_allow_html=True)
 
-        st.markdown("---")  # Séparateur
+        st.markdown("---")
 
         # --- Visualisation Interactive ---
         st.subheader("Visualisation de l'Anomalie (Analyse de la Distribution)")
@@ -265,12 +273,9 @@ def show():
         # --- Affichage des Valeurs PCA sous forme de Tableau ---
         st.markdown("---")
         with st.expander("Voir toutes les valeurs PCA (pour un examen détaillé)"):
-
             v_data = {f"V{i}": current_transaction[f"V{i}"] for i in range(1, 29)}
             v_df = pd.DataFrame(v_data.items(), columns=['Caractéristique', 'Valeur'])
-
-            # Afficher les valeurs V en utilisant le style Streamlit pour plus de propreté
-            st.dataframe(v_df.T, use_container_width=True)  # Transposée pour un meilleur affichage
+            st.dataframe(v_df.T, use_container_width=True)
 
         st.markdown("---")
 
@@ -291,9 +296,6 @@ def show():
                                   "Rétroaction de transaction *normale* enregistrée avec succès ! Redirection...")
 
         st.markdown('</div>', unsafe_allow_html=True)
-
-
-
 
 if __name__ == "__main__":
     show()

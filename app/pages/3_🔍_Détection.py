@@ -8,12 +8,9 @@ from typing import Optional
 from utils.auth import check_authentication
 
 # Assurez-vous d'avoir les fonctions ui_style importées
-# Remarque : Les fonctions ui_style.py ne sont pas incluses ici.
-# Elles doivent être dans un fichier séparé pour que l'importation fonctionne.
 try:
     from utils.ui_style import setup_page_config, load_css, create_footer, create_header
     from utils.ui_style import apply_button_style
-
     UI_STYLE_EXISTS = True
 except ImportError:
     UI_STYLE_EXISTS = False
@@ -21,11 +18,11 @@ except ImportError:
 check_authentication()
 
 # URL de l'API FastAPI
-# APRÈS (production)
-API_URL = "https://detection-fraud-bancaire.fly.dev/predict"
-API_FEEDBACK_URL = "https://detection-fraud-bancaire.fly.dev/feedback"
+API_URL = "https://detection-fraud-bancaire.fly.dev"
+PREDICT_URL = f"{API_URL}/predict"
+FEEDBACK_URL = f"{API_URL}/feedback"
+
 # Exemple de transaction (classe = 0, non-fraude)
-# Source: Dataset Credit Card Fraud Detection
 TRANSACTION_EXAMPLE = {
     "Time": 0.0, "V1": -1.3598071336738, "V2": -0.0727811733098497, "V3": 2.53634673796914,
     "V4": 1.37815522427443, "V5": -0.338320769942518, "V6": 0.462387777762292,
@@ -40,7 +37,6 @@ TRANSACTION_EXAMPLE = {
 }
 
 # Exemple de transaction (classe = 1, fraude)
-# Données provenant du même dataset, c'est une transaction réelle frauduleuse
 TRANSACTION_FRAUD_EXAMPLE = {
     "Time": 406.0, "V1": -2.3122265423263, "V2": 1.95199201150017, "V3": -1.60985072049533,
     "V4": 3.99790558832009, "V5": -0.522187864274941, "V6": -1.42654531920537,
@@ -54,20 +50,42 @@ TRANSACTION_FRAUD_EXAMPLE = {
     "V28": -0.0210530534538215, "Amount": 0.0
 }
 
+def predict_transaction(transaction_data):
+    """
+    Prédit si une transaction est frauduleuse via l'API.
+    """
+    try:
+        response = requests.post(PREDICT_URL, json=transaction_data, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            st.error(f"Erreur API: {response.status_code} - {response.text}")
+            return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erreur de connexion à l'API: {e}")
+        return None
 
-
-# (Les imports existants sont conservés ici)
-# ...
+def submit_feedback(feedback_data):
+    """
+    Soumet une rétroaction à l'API.
+    """
+    try:
+        response = requests.post(FEEDBACK_URL, json=feedback_data, timeout=10)
+        if response.status_code == 200:
+            return True
+        else:
+            st.error(f"Erreur lors de l'envoi de la rétroaction: {response.status_code}")
+            return False
+    except requests.exceptions.RequestException as e:
+        st.error(f"Erreur de connexion à l'API: {e}")
+        return False
 
 def show():
     """
     Affiche la page de détection de fraude en temps réel.
     """
 
-    # --- AJOUT : Initialisation de l'état de session ---
-
-    # Initialisation des clés nécessaires pour les champs de saisie (st.number_input)
-    # Ceci est CRUCIAL pour éviter les erreurs de désynchronisation du DOM (NotFoundError).
+    # Initialisation de l'état de session
     if 'Time' not in st.session_state:
         st.session_state['Time'] = TRANSACTION_EXAMPLE['Time']
     if 'Amount' not in st.session_state:
@@ -77,23 +95,17 @@ def show():
     for i in range(1, 29):
         key = f"V{i}"
         if key not in st.session_state:
-            # Utilise la valeur de l'exemple non-fraude comme valeur d'initialisation par défaut
             st.session_state[key] = TRANSACTION_EXAMPLE.get(key, 0.0)
 
-            # Initialisation des clés de résultats (si nécessaire)
+    # Initialisation des clés de résultats
     if 'last_prediction_class' not in st.session_state:
         st.session_state['last_prediction_class'] = None
     if 'last_transaction_data' not in st.session_state:
         st.session_state['last_transaction_data'] = None
 
-    # --- Fin de l'Initialisation ---
-
     if UI_STYLE_EXISTS:
-        # setup_page_config()
         load_css()
         apply_button_style()
-        # NOTE : create_footer() est souvent mieux placé à la fin du script principal (app.py)
-        # Mais on le laisse ici pour la cohérence avec votre code original si besoin
         create_footer()
 
     st.title("🔍 Détection en Temps Réel")
@@ -102,31 +114,25 @@ def show():
     Saisissez les paramètres de la transaction ou utilisez les exemples fournis.
     """)
 
-    # Boutons pour charger les données d'exemples alignés horizontalement
+    # Boutons pour charger les données d'exemples
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Charger un exemple non-fraude"):
             for key, value in TRANSACTION_EXAMPLE.items():
                 st.session_state[key] = value
-            # Stocke également la transaction pour une éventuelle soumission de rétroaction
             st.session_state['last_transaction_data'] = TRANSACTION_EXAMPLE
-            # st.rerun() est commenté, ce qui est CORRECT
 
     with col2:
         if st.button("Charger un exemple de fraude"):
             for key, value in TRANSACTION_FRAUD_EXAMPLE.items():
                 st.session_state[key] = value
-            # Stocke également la transaction pour une éventuelle soumission de rétroaction
             st.session_state['last_transaction_data'] = TRANSACTION_FRAUD_EXAMPLE
-            # st.rerun() est commenté, ce qui est CORRECT
 
-    # 1. Formulaire de saisie des données
+    # Formulaire de saisie des données
     with st.form("transaction_form"):
         st.subheader("Entrez les détails de la transaction")
 
         col1, col2 = st.columns(2)
-
-        # Les valeurs sont récupérées DE L'ÉTAT DE SESSION initialisé ci-dessus
         with col1:
             time_val = st.session_state.get("Time")
             time = st.number_input("Time", value=time_val, step=0.01, format="%.2f",
@@ -145,46 +151,32 @@ def show():
         for i in range(1, 29):
             col_index = (i - 1) % 4
             with cols_v[col_index]:
-                # La valeur par défaut V{i} vient de l'initialisation de st.session_state[f"V{i}"]
                 v_feature_val = st.session_state.get(f"V{i}")
                 v_features[f"V{i}"] = st.number_input(f"V{i}", value=v_feature_val, step=0.01, format="%.2f")
 
         submit_button = st.form_submit_button(label="Analyser la transaction")
 
-    # Reste de la logique (API call, affichage des résultats, feedback)
-    # ... (inchangé) ...
-
+    # Traitement de la soumission du formulaire
     if submit_button:
-        # 2. Préparation et envoi des données à l'API
-        try:
-            # ... (code API call inchangé) ...
-            transaction_data = {
-                "Time": time,
-                "Amount": amount,
-                **v_features
-            }
+        transaction_data = {
+            "Time": time,
+            "Amount": amount,
+            **v_features
+        }
 
-            response = requests.post(API_URL, json=transaction_data)
-            response.raise_for_status()  # Lève une exception si le statut est une erreur (4xx ou 5xx)
+        # Appel à l'API pour la prédiction
+        with st.spinner("🔍 Analyse de la transaction en cours..."):
+            prediction_result = predict_transaction(transaction_data)
 
-            prediction_result = response.json()
+        if prediction_result:
             st.session_state['last_transaction_data'] = transaction_data
-
-            # Assumons que la réponse contient 'prediction', 'probability' et 'confidence'.
             st.session_state['last_prediction_class'] = prediction_result.get("prediction")
             st.session_state['last_prediction_prob'] = prediction_result.get("probability", 0.0)
             st.session_state['last_prediction_confidence'] = prediction_result.get("confidence", "Non disponible")
+        else:
+            st.error("❌ Impossible d'obtenir une prédiction de l'API.")
 
-        except requests.exceptions.ConnectionError:
-            st.error("❌ Erreur de connexion à l'API. Assurez-vous que l'API est en cours d'exécution.")
-        except requests.exceptions.RequestException as e:
-            st.error(f"❌ Une erreur est survenue lors de l'appel à l'API : {e}")
-        except json.JSONDecodeError:
-            st.error("❌ L'API a renvoyé une réponse invalide.")
-        except Exception as e:
-            st.error(f"❌ Une erreur inattendue est survenue : {e}")
-
-    # L'affichage des résultats est maintenant en dehors du bloc de soumission du formulaire
+    # Affichage des résultats
     if 'last_prediction_class' in st.session_state and st.session_state.get('last_prediction_class') is not None:
         st.markdown("---")
         st.subheader("Résultat de la prédiction")
@@ -192,8 +184,6 @@ def show():
         prediction_class = st.session_state.get('last_prediction_class')
         prediction_prob = st.session_state.get('last_prediction_prob', 0.0)
         prediction_confidence = st.session_state.get('last_prediction_confidence', "Non disponible")
-
-        # ... (le reste du code d'affichage des résultats, des métriques et du feedback est inchangé) ...
 
         if prediction_class == 1:
             st.error("🚨 La transaction est **suspectée de fraude** !")
@@ -211,11 +201,10 @@ def show():
         st.info(
             "💡 Remarque : La prédiction se base sur le modèle XGBoost, mais une vérification manuelle peut être nécessaire pour les cas ambigus.")
 
-        # 4. Nouvelle section : Recommandations et Facteurs Clés
+        # Section Recommandations et Facteurs Clés
         st.markdown("---")
         with st.expander("Recommandations et Facteurs Clés"):
             # Données fictives pour l'importance des caractéristiques
-            # Ces données devraient idéalement provenir de l'analyse de l'API
             fake_importance = {
                 'V17': 0.25, 'V14': 0.20, 'V12': 0.15, 'V10': 0.12, 'V11': 0.08, 'Amount': 0.05
             }
@@ -258,37 +247,29 @@ def show():
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-            else:
-                st.info("Aucune recommandation disponible pour une prédiction invalide.")
-
-        # 5. Section de rétroaction pour l'analyste
+        # Section de rétroaction pour l'analyste
         st.markdown("---")
         st.subheader("Confirmation manuelle de la transaction")
 
-        # Afficher les boutons de confirmation en fonction de la prédiction
         if prediction_class == 0:
             st.markdown("Le modèle a prédit que cette transaction est **normale**. Veuillez confirmer ce résultat.")
             if st.button("✅ Confirmer comme normale", key="confirm_non_fraud"):
-                try:
-                    feedback_data = st.session_state['last_transaction_data']
-                    feedback_data['Class'] = 0
-                    response = requests.post(API_FEEDBACK_URL, json=feedback_data)
-                    response.raise_for_status()
+                feedback_data = st.session_state['last_transaction_data'].copy()
+                feedback_data['Class'] = 0
+                if submit_feedback(feedback_data):
                     st.success("🎉 Rétroaction enregistrée avec succès : Transaction marquée comme non-fraude.")
-                except Exception as e:
-                    st.error(f"❌ Échec de l'enregistrement de la rétroaction : {e}")
+                else:
+                    st.error("❌ Échec de l'enregistrement de la rétroaction.")
 
         elif prediction_class == 1:
             st.markdown("Le modèle a prédit que cette transaction est **frauduleuse**. Veuillez confirmer ce résultat.")
             if st.button("🚨 Confirmer comme fraude", key="confirm_fraud"):
-                try:
-                    feedback_data = st.session_state['last_transaction_data']
-                    feedback_data['Class'] = 1
-                    response = requests.post(API_FEEDBACK_URL, json=feedback_data)
-                    response.raise_for_status()
+                feedback_data = st.session_state['last_transaction_data'].copy()
+                feedback_data['Class'] = 1
+                if submit_feedback(feedback_data):
                     st.success("🎉 Rétroaction enregistrée avec succès : Transaction marquée comme fraude.")
-                except Exception as e:
-                    st.error(f"❌ Échec de l'enregistrement de la rétroaction : {e}")
-# S'assurer que le script s'exécute correctement
+                else:
+                    st.error("❌ Échec de l'enregistrement de la rétroaction.")
+
 if __name__ == "__main__":
     show()
