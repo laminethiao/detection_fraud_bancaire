@@ -13,7 +13,7 @@ from utils.auth import check_authentication
 check_authentication()
 
 # URL de l'API FastAPI
-API_URL = "http://127.0.0.1:8000"
+API_URL = "https://detection-fraud-bancaire.fly.dev"
 
 @st.cache_resource
 def load_resources():

@@ -21,9 +21,9 @@ except ImportError:
 check_authentication()
 
 # URL de l'API FastAPI
-API_URL = "http://127.0.0.1:8000/predict"
-API_FEEDBACK_URL = "http://127.0.0.1:8000/feedback"  # Nouvelle URL pour la rétroaction
-
+# APRÈS (production)
+API_URL = "https://detection-fraud-bancaire.fly.dev/predict"
+API_FEEDBACK_URL = "https://detection-fraud-bancaire.fly.dev/feedback"
 # Exemple de transaction (classe = 0, non-fraude)
 # Source: Dataset Credit Card Fraud Detection
 TRANSACTION_EXAMPLE = {
