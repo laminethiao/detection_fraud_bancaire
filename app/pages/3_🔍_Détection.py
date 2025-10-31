@@ -18,7 +18,7 @@ except ImportError:
 check_authentication()
 
 # URL de l'API FastAPI
-API_URL = "http://detection-fraud-bancaire.fly.dev"
+API_URL = "https://lamine-th0101-detection-fraud-bancaire-api.hf.space"
 PREDICT_URL = f"{API_URL}/predict"
 FEEDBACK_URL = f"{API_URL}/feedback"
 

@@ -11,7 +11,7 @@ from utils.auth import check_authentication
 check_authentication()
 
 # URL de l'API FastAPI
-API_URL = "http://detection-fraud-bancaire.fly.dev"
+API_URL = "https://lamine-th0101-detection-fraud-bancaire-api.hf.space"
 
 @st.cache_data
 def get_data():
