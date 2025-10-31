@@ -2,12 +2,13 @@ import joblib
 import pandas as pd
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware # 🚨 Nouvelle Importation
+from fastapi.middleware.cors import CORSMiddleware
 import os
 import numpy as np
-from typing import List, Dict, Any # 🚨 Nouvelle Importation
+from typing import List, Dict, Any
 
-# Modèle pour la validation des données d'entrée
+# --- MODÈLES DE DONNÉES (SCHEMAS) ---
+
 class Transaction(BaseModel):
     Time: float
     V1: float
@@ -40,13 +41,16 @@ class Transaction(BaseModel):
     V28: float
     Amount: float
 
-# 🚨 NOUVEAU MODÈLE POUR LE FEEDBACK (AlertIn)
 class AlertIn(BaseModel):
     transaction: Transaction
-    model_prediction: int # Prédiction initiale du modèle (0 ou 1)
-    user_feedback: int    # Classe réelle validée par l'utilisateur (0 ou 1)
+    model_prediction: int
+    user_feedback: int
 
-# Initialisation de l'API FastAPI
+class BatchTransactions(BaseModel):
+    transactions: List[Transaction] # Requis par Dashbord.py
+
+# --- INITIALISATION ET CONFIGURATION ---
+
 app = FastAPI(title="Fraud Detection API")
 
 # Configuration CORS pour Streamlit
@@ -58,56 +62,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Variables Globales ---
+# --- VARIABLES GLOBALES ET DONNÉES ---
 model = None
 scaler = None
-# Fichier de stockage pour la rétroaction MLOps (Log permanent)
 FEEDBACK_FILE = "feedback_data.csv"
-# 🚨 FILE D'ATTENTE DES ALERTES (Queue en mémoire, pour /alerts)
 PENDING_ALERTS_DB: List[Dict[str, Any]] = []
 
-# Fonction pour charger les fichiers au démarrage de l'application (Inchangement)
+# --- FONCTIONS DE CHARGEMENT ---
+
 @app.on_event("startup")
 def load_model():
-    """
-    Charge le modèle et le scaler une seule fois au démarrage de l'API.
-    """
+    """Charge le modèle et le scaler au démarrage de l'API."""
     global model, scaler
     try:
-        # Chemin corrigé pour pointer vers le dossier 'app/models'
         model_filename = os.path.join('app', 'models', 'xgb_fraud_detection_model.pkl')
         scaler_filename = os.path.join('app', 'models', 'scaler.pkl')
 
         model = joblib.load(model_filename)
         scaler = joblib.load(scaler_filename)
-        print(f"✅ Modèle et Scaler chargés avec succès pour l'API.")
+        print("✅ Modèle et Scaler chargés.")
     except Exception as e:
         print(f"❌ Erreur lors du chargement des fichiers: {e}")
         model = None
         scaler = None
 
-# Endpoint de base pour vérifier si l'API est en ligne
-@app.get("/health")
-async def home():
-    """
-    Vérifie l'état de l'API.
-    """
-    return {
-        "status": "ok",
-        "message": "API de détection de fraude en cours d'exécution."
-    }
+def load_historical_data_df():
+    """Charge un échantillon du DataFrame historique."""
+    try:
+        # 🚨 ASSUREZ-VOUS QUE CE CHEMIN EST CORRECT DANS VOTRE DÉPÔT GITHUB
+        file_path = "data/creditcard_cleaned.csv" 
+        df = pd.read_csv(file_path).sample(n=10000, random_state=42)
+        if 'Class' not in df.columns:
+             df['Class'] = 0 # Fallback si Class est manquante
+        return df
+    except FileNotFoundError:
+        print(f"❌ Fichier historique non trouvé : {file_path}")
+        return pd.DataFrame()
 
-# Endpoint de prédiction (MODIFIÉ pour ajouter à la queue)
+# --- ENDPOINTS D'ÉTAT ET DE DONNÉES ---
+
+@app.get("/health")
+async def get_health():
+    """Vérification de l'état de l'API."""
+    return {"status": "ok", "message": "API de détection de fraude en cours d'exécution."}
+
+@app.get("/historical_data")
+async def get_historical_data():
+    """Fournit des données historiques pour la visualisation Streamlit (Dashbord et Alertes)."""
+    df = load_historical_data_df()
+    if df.empty:
+        raise HTTPException(status_code=500, detail="Impossible de charger les données historiques côté API.")
+        
+    return {"data": df.to_dict(orient="records")}
+
+@app.get("/alerts")
+def get_alerts():
+    """Récupère la liste des alertes de fraude non résolues (queue en mémoire)."""
+    return {"alerts": PENDING_ALERTS_DB}
+
+# --- ENDPOINTS DE PRÉDICTION ---
+
 @app.post("/predict")
 async def predict_transaction(transaction: Transaction):
-    """
-    Prédit si une transaction est frauduleuse (1) ou non (0).
-    Ajoute les alertes à la file PENDING_ALERTS_DB.
-    """
+    """Prédit une seule transaction (utilisé par Detection.py)."""
     global model, scaler, PENDING_ALERTS_DB
 
     if model is None or scaler is None:
-        raise HTTPException(status_code=503, detail="Modèle non chargé. Le service est indisponible.")
+        raise HTTPException(status_code=503, detail="Modèle non chargé.")
 
     try:
         df = pd.DataFrame([transaction.model_dump()])
@@ -116,13 +137,12 @@ async def predict_transaction(transaction: Transaction):
 
         prediction = model.predict(df)[0]
         prediction_proba = model.predict_proba(df)[0][1]
-        
         confidence = "Haute" if prediction_proba > 0.8 else ("Moyenne" if prediction_proba > 0.5 else "Basse")
 
-        # 🚨 LOGIQUE D'ALERTE : Si c'est une fraude, l'ajouter à la file d'attente
+        # LOGIQUE D'ALERTE : Ajouter à la file d'attente si fraude
         if prediction == 1:
             alert_entry = transaction.model_dump()
-            alert_entry['model_prediction'] = int(prediction) # Nécessaire pour le front-end /alert
+            alert_entry['model_prediction'] = int(prediction)
             alert_entry['prediction_score'] = float(prediction_proba)
             PENDING_ALERTS_DB.append(alert_entry)
 
@@ -134,23 +154,55 @@ async def predict_transaction(transaction: Transaction):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur interne lors de la prédiction: {e}")
 
-# Endpoint pour la rétroaction (NOUVEL ENDPOINT /alert)
+@app.post("/predict_batch")
+async def predict_batch(batch_data: BatchTransactions):
+    """Prédit un lot de transactions (utilisé par Dashbord.py)."""
+    global model, scaler, PENDING_ALERTS_DB
+    
+    # 1. Préparer les données en DataFrame
+    df = pd.DataFrame([t.model_dump() for t in batch_data.transactions])
+    
+    if model is None or scaler is None:
+        raise HTTPException(status_code=503, detail="Modèle non chargé.")
+
+    try:
+        # 2. Normaliser les variables 'Time' et 'Amount'
+        scaled_features = ['Time', 'Amount']
+        df[scaled_features] = scaler.transform(df[scaled_features])
+
+        # 3. Faire la prédiction par lot
+        predictions = model.predict(df)
+        prediction_probas = model.predict_proba(df)[:, 1]
+        
+        # 4. Gérer les Alertes : Ajouter à la file d'attente (logique simplifiée)
+        for i, (pred, proba) in enumerate(zip(predictions, prediction_probas)):
+            if pred == 1:
+                # 🚨 N'ajoutez que les nouvelles transactions à la file,
+                # mais dans le contexte du Dashboard, on se contente de la prédiction.
+                # L'ajout en masse ici peut être lourd. Si vous voulez un comportement
+                # plus précis, il faudrait un mécanisme de vérification d'unicité.
+                pass 
+                
+        # 5. Retourner la liste des prédictions
+        return {"predictions": [int(p) for p in predictions]}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur interne lors de la prédiction par lot: {e}")
+
+
+# --- ENDPOINT DE FEEDBACK (MLOPS) ---
+
 @app.post("/alert")
 def record_alert_feedback(alert_data: AlertIn):
-    """
-    Enregistre le feedback de l'utilisateur (MLOps) et retire l'alerte de la file d'attente.
-    """
+    """Enregistre le feedback (MLOps) et retire l'alerte de la queue."""
     global PENDING_ALERTS_DB
     
     # 1. Enregistrer les données de feedback (MLOps Log)
     try:
-        # Créer le DataFrame avec toutes les informations
         transaction_df = pd.DataFrame([alert_data.transaction.model_dump()])
-        # Ajouter les colonnes de MLOps
         transaction_df['model_prediction'] = alert_data.model_prediction
         transaction_df['user_feedback'] = alert_data.user_feedback
         
-        # Écrire dans le fichier CSV (log permanent)
         header = not os.path.exists(FEEDBACK_FILE)
         transaction_df.to_csv(FEEDBACK_FILE, mode='a', header=header, index=False)
     
@@ -161,23 +213,12 @@ def record_alert_feedback(alert_data: AlertIn):
     tx_time = alert_data.transaction.Time
     tx_amount = alert_data.transaction.Amount
     
-    # On filtre la file d'attente pour exclure la transaction traitée
+    # Filtrer la file d'attente pour exclure la transaction traitée
     new_alerts_db = [
         alert for alert in PENDING_ALERTS_DB 
         if not (alert.get('Time') == tx_time and alert.get('Amount') == tx_amount)
     ]
     
-    # Mise à jour de la queue globale
     PENDING_ALERTS_DB = new_alerts_db
 
     return {"status": "success", "message": "Feedback enregistré et alerte retirée de la file."}
-
-
-# Endpoint pour l'historique des alertes - (MODIFIÉ pour lire la queue en mémoire)
-@app.get("/alerts")
-def get_alerts():
-    """
-    Récupère la liste des alertes de fraude non résolues (depuis la queue en mémoire).
-    """
-    # 🚨 Retourne la queue d'alertes en mémoire, pas le fichier CSV de log complet
-    return {"alerts": PENDING_ALERTS_DB}
