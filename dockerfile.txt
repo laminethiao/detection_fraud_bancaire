@@ -1,26 +1,37 @@
+ dashbord.py
+
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import joblib
 import os
 import requests
 from utils.data_loader import load_data
 from utils.ui_style import setup_page_config, load_css, create_footer, create_header
+
 from utils.auth import check_authentication
-from typing import List # Ajouté pour le type hinting
 
 check_authentication()
 
 # URL de l'API FastAPI
-# Le endpoint /predict_batch est supposé être disponible sur cette URL
-API_URL = "https://lamine-th0101-detection-fraud-bancaire-api.hf.space"
+API_URL = "https://detection-fraud-bancaire.fly.dev"
 
-# Liste des 30 caractéristiques à envoyer à l'API
-FEATURE_COLS = [
-    "Time", "V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10",
-    "V11", "V12", "V13", "V14", "V15", "V16", "V17", "V18", "V19", "V20",
-    "V21", "V22", "V23", "V24", "V25", "V26", "V27", "V28", "Amount"
-]
+@st.cache_resource
+def load_resources():
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.join(current_dir, "..")
+    model_path = os.path.join(parent_dir, "models", "xgb_fraud_detection_model.pkl")
+    scaler_path = os.path.join(parent_dir, "models", "scaler.pkl")
+
+    try:
+        model = joblib.load(model_path)
+        scaler = joblib.load(scaler_path)
+        return model, scaler
+    except FileNotFoundError as e:
+        st.error(f"Erreur : Un des fichiers du modèle n'a pas été trouvé. Veuillez vérifier le chemin. {e}")
+        return None, None
 
 @st.cache_data
 def get_data():
@@ -32,17 +43,11 @@ def get_data():
 def get_feedback_data():
     """
     Récupère les données de rétroaction depuis l'API.
-    (Pas de changement ici, l'endpoint /alerts n'a pas changé)
     """
     try:
         response = requests.get(f"{API_URL}/alerts")
         if response.status_code == 200:
-            # S'assurer que les colonnes 'Time', 'Amount', et 'Class' sont présentes
-            feedback_df = pd.DataFrame(response.json()['alerts'])
-            if not feedback_df.empty:
-                 # Ajout de l'heure pour affichage si nécessaire dans le futur
-                 feedback_df['Hour'] = feedback_df['Time'].apply(lambda x: pd.to_datetime(x, unit='s').hour)
-            return feedback_df
+            return pd.DataFrame(response.json()['alerts'])
         else:
             st.error("Erreur lors de la récupération des données de rétroaction.")
             return pd.DataFrame()
@@ -50,43 +55,8 @@ def get_feedback_data():
         st.error(f"Impossible de se connecter à l'API : {e}. Assurez-vous que l'API est en cours d'exécution.")
         return pd.DataFrame()
 
-# ❌ La fonction predict_transaction_api n'est plus nécessaire
-
-@st.cache_data(show_spinner="⏳ Prédictions en cours via API (lot)...")
-def predict_batch_api(df_to_predict: pd.DataFrame) -> List[int]:
-    """
-    🚀 NOUVELLE FONCTION OPTIMISÉE : Prédit un lot de transactions via l'API.
-    """
-    if df_to_predict.empty:
-        return []
-    
-    st.info(f"Envoi de {len(df_to_predict):,.0f} transactions à l'API pour prédiction en lot.")
-
-    try:
-        # 1. Préparer les données dans un format JSON compatible avec l'API de lot
-        # Créer la structure JSON { "transactions": [...] }
-        # Assurer que les données sont des floats avant l'envoi
-        data_to_send = {
-            'transactions': df_to_predict[FEATURE_COLS].astype(float).to_dict('records')
-        }
-        
-        # 2. Appel unique à l'API de prédiction par lot
-        # Augmentation du timeout au cas où le traitement par lot soit long
-        response = requests.post(f"{API_URL}/predict_batch", json=data_to_send, timeout=120) 
-        
-        if response.status_code == 200:
-            predictions = response.json().get('predictions', [])
-            return predictions
-        else:
-            st.error(f"Erreur API lors de la prédiction par lot: {response.status_code}")
-            st.write("Réponse de l'API:", response.text)
-            # Retourne un échec (classe 0) pour toutes les lignes en cas d'erreur
-            return [0] * len(df_to_predict) 
-    except requests.exceptions.RequestException as e:
-        st.error(f"Erreur de connexion à l'API lors de la prédiction par lot: {e}")
-        return [0] * len(df_to_predict)
-
 def show():
+
     load_css()
     create_footer()
 
@@ -98,8 +68,6 @@ def show():
     df = get_data()
 
     st.sidebar.header("🔍 Filtres Principaux")
-    # ... (le reste du code de la sidebar) ...
-
     fraud_filter = st.sidebar.radio("Type de transaction", ["Toutes", "Normales", "Fraudes"], horizontal=True)
 
     quick_amount = st.sidebar.selectbox("Plage de montant rapide",
@@ -132,32 +100,41 @@ def show():
         (filtered_df['Hour'] <= hour_range[1])
         ]
 
-    # --- PRÉDICTION SUR LES DONNÉES FILTRÉES VIA L'API (OPTIMISÉ) ---
-    if filtered_df.empty:
+    # --- PRÉDICTION SUR LES DONNÉES FILTRÉES ---
+    model, scaler = load_resources()
+
+    if model is None or scaler is None:
+        st.error("Les ressources du modèle n'ont pas pu être chargées. Contactez l'administrateur.")
+    elif filtered_df.empty:
         st.warning("Aucune transaction ne correspond à vos filtres. Veuillez ajuster les critères de recherche.")
         filtered_df['Predicted_Class'] = 0
     else:
         try:
-            # 🚀 Utilisation de la prédiction par lot
-            predictions = predict_batch_api(filtered_df)
-            
-            # Vérification de la taille de la réponse
-            if len(predictions) == len(filtered_df):
-                 filtered_df['Predicted_Class'] = predictions
-                 st.success(f"✅ Prédictions terminées avec succès pour {len(predictions):,.0f} transactions !")
-            else:
-                 st.error(f"Erreur: Le nombre de prédictions ({len(predictions)}) renvoyées ne correspond pas au nombre de transactions filtrées ({len(filtered_df)}).")
-                 filtered_df['Predicted_Class'] = 0 # Échec de la prédiction
-            
-        except Exception as e:
-            st.error(f"Erreur inattendue lors de la prédiction : {e}")
-            filtered_df['Predicted_Class'] = 0
+            # Créer une copie du DataFrame pour ne pas modifier l'original
+            features = filtered_df.copy()
 
+            # Normaliser les variables 'Time' et 'Amount' ENSEMBLE
+            features_to_scale = ['Time', 'Amount']
+            features[features_to_scale] = scaler.transform(features[features_to_scale])
+
+            # Créer la fonctionnalité 'Amount_Category' si le modèle l'attend
+            if 'Amount_Category' in model.feature_names_in_:
+                bins = [0, 50, 100, 500, float('inf')]
+                labels = [0, 1, 2, 3]
+                features['Amount_Category'] = pd.cut(features['Amount'], bins=bins, labels=labels, right=False).astype(int)
+
+            # S'assurer que les colonnes sont dans le bon ordre avant de faire la prédiction
+            final_features = features[list(model.feature_names_in_)]
+
+            # Faire la prédiction
+            predictions = model.predict(final_features)
+            filtered_df['Predicted_Class'] = predictions
+        except Exception as e:
+            st.error(f"Une erreur s'est produite lors de la prédiction du modèle. Erreur: {e}")
+            filtered_df['Predicted_Class'] = 0
 
     # --- AFFICHAGE DES KPIS ET VISUALISATIONS ---
     st.header("Indicateurs de Performance Clés")
-
-    # ... (Le reste du code d'affichage des KPI, visualisations, et téléchargement n'a pas besoin d'être modifié) ...
 
     total_transactions = filtered_df.shape[0]
     total_fraud_transactions = filtered_df['Class'].sum()
@@ -246,7 +223,7 @@ def show():
             )
 
         with col_data:
-            st.markdown("◆ Télécharger les Données Filtrées")
+            st.markdown("#### Télécharger les Données Filtrées")
             st.info("Aperçu des 10 premières lignes. Le fichier CSV complet contient toutes les transactions filtrées.")
             st.dataframe(filtered_df.head(10), use_container_width=True)
             csv_data = filtered_df.to_csv(index=False).encode('utf-8')

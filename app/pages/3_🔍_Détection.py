@@ -19,8 +19,10 @@ check_authentication()
 
 # URL de l'API FastAPI
 API_URL = "https://lamine-th0101-detection-fraud-bancaire-api.hf.space"
-PREDICT_URL = f"{API_URL}/predict"
-FEEDBACK_URL = f"{API_URL}/feedback"
+# 🚨 NOTE: L'endpoint de prédiction reste /predict (pour la détection individuelle)
+PREDICT_URL = f"{API_URL}/predict" 
+# 🚨 NOUVEL ENDPOINT POUR LE FEEDBACK (selon main.py)
+ALERT_URL = f"{API_URL}/alert" 
 
 # Exemple de transaction (classe = 0, non-fraude)
 TRANSACTION_EXAMPLE = {
@@ -55,7 +57,11 @@ def predict_transaction(transaction_data):
     Prédit si une transaction est frauduleuse via l'API.
     """
     try:
-        response = requests.post(PREDICT_URL, json=transaction_data, timeout=10)
+        # ⚠️ Pour la détection individuelle, il est crucial d'utiliser l'endpoint /predict
+        # et de s'assurer que les données sont des floats.
+        float_data = {k: float(v) for k, v in transaction_data.items()}
+        
+        response = requests.post(PREDICT_URL, json=float_data, timeout=10)
         if response.status_code == 200:
             return response.json()
         else:
@@ -65,19 +71,27 @@ def predict_transaction(transaction_data):
         st.error(f"Erreur de connexion à l'API: {e}")
         return None
 
-def submit_feedback(feedback_data):
+def submit_feedback(transaction_data, model_pred: int, user_class: int):
     """
-    Soumet une rétroaction à l'API.
+    Soumet une rétroaction à l'API en utilisant le nouveau format d'alerte.
     """
+    # Construction du corps de la requête selon le modèle AlertIn (schemas.py)
+    feedback_data = {
+        "transaction": {k: float(v) for k, v in transaction_data.items()},
+        "model_prediction": model_pred,
+        "user_feedback": user_class
+    }
+    
     try:
-        response = requests.post(FEEDBACK_URL, json=feedback_data, timeout=10)
+        # ⚠️ Utilisation du nouvel endpoint /alert
+        response = requests.post(ALERT_URL, json=feedback_data, timeout=10)
         if response.status_code == 200:
             return True
         else:
-            st.error(f"Erreur lors de l'envoi de la rétroaction: {response.status_code}")
+            st.error(f"Erreur lors de l'envoi de la rétroaction: {response.status_code} - {response.text}")
             return False
     except requests.exceptions.RequestException as e:
-        st.error(f"Erreur de connexion à l'API: {e}")
+        st.error(f"Erreur de connexion à l'API pour le feedback: {e}")
         return False
 
 def show():
@@ -85,13 +99,13 @@ def show():
     Affiche la page de détection de fraude en temps réel.
     """
 
-    # Initialisation de l'état de session
+    # Initialisation de l'état de session (inchangé)
     if 'Time' not in st.session_state:
         st.session_state['Time'] = TRANSACTION_EXAMPLE['Time']
     if 'Amount' not in st.session_state:
         st.session_state['Amount'] = TRANSACTION_EXAMPLE['Amount']
 
-    # Initialiser les V-features
+    # Initialiser les V-features (inchangé)
     for i in range(1, 29):
         key = f"V{i}"
         if key not in st.session_state:
@@ -102,6 +116,9 @@ def show():
         st.session_state['last_prediction_class'] = None
     if 'last_transaction_data' not in st.session_state:
         st.session_state['last_transaction_data'] = None
+    # Ajout d'une clé pour stocker la prédiction du modèle (nécessaire pour le feedback)
+    if 'last_model_prediction' not in st.session_state:
+        st.session_state['last_model_prediction'] = None
 
     if UI_STYLE_EXISTS:
         load_css()
@@ -114,45 +131,51 @@ def show():
     Saisissez les paramètres de la transaction ou utilisez les exemples fournis.
     """)
 
-    # Boutons pour charger les données d'exemples
+    # Boutons pour charger les données d'exemples (inchangé)
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Charger un exemple non-fraude"):
             for key, value in TRANSACTION_EXAMPLE.items():
                 st.session_state[key] = value
-            st.session_state['last_transaction_data'] = TRANSACTION_EXAMPLE
+            # On met à jour l'état de session pour les inputs (re-run)
+            st.session_state['last_transaction_data'] = None 
+            st.session_state['last_prediction_class'] = None
+            st.rerun() # Force la mise à jour des champs de saisie
 
     with col2:
         if st.button("Charger un exemple de fraude"):
             for key, value in TRANSACTION_FRAUD_EXAMPLE.items():
                 st.session_state[key] = value
-            st.session_state['last_transaction_data'] = TRANSACTION_FRAUD_EXAMPLE
+            # On met à jour l'état de session pour les inputs (re-run)
+            st.session_state['last_transaction_data'] = None
+            st.session_state['last_prediction_class'] = None
+            st.rerun() # Force la mise à jour des champs de saisie
 
-    # Formulaire de saisie des données
+    # Formulaire de saisie des données (inchangé, sauf ajout de la clé "key" aux number_input pour la mise à jour via bouton)
     with st.form("transaction_form"):
         st.subheader("Entrez les détails de la transaction")
 
         col1, col2 = st.columns(2)
         with col1:
             time_val = st.session_state.get("Time")
-            time = st.number_input("Time", value=time_val, step=0.01, format="%.2f",
+            time = st.number_input("Time", value=time_val, step=0.01, format="%.2f", key="input_Time",
                                    help="Temps écoulé depuis la première transaction en secondes.")
         with col2:
             amount_val = st.session_state.get("Amount")
-            amount = st.number_input("Amount", value=amount_val, step=0.01, format="%.2f",
+            amount = st.number_input("Amount", value=amount_val, step=0.01, format="%.2f", key="input_Amount",
                                      help="Montant de la transaction.")
 
         st.markdown("---")
         st.subheader("Variables anonymisées (V1-V28)")
 
-        # Création des colonnes pour un affichage propre des V-features
         cols_v = st.columns(4)
         v_features = {}
         for i in range(1, 29):
             col_index = (i - 1) % 4
             with cols_v[col_index]:
                 v_feature_val = st.session_state.get(f"V{i}")
-                v_features[f"V{i}"] = st.number_input(f"V{i}", value=v_feature_val, step=0.01, format="%.2f")
+                # 🚨 Clé unique ajoutée pour permettre la mise à jour via st.session_state
+                v_features[f"V{i}"] = st.number_input(f"V{i}", value=v_feature_val, step=0.01, format="%.2f", key=f"input_V{i}")
 
         submit_button = st.form_submit_button(label="Analyser la transaction")
 
@@ -171,17 +194,19 @@ def show():
         if prediction_result:
             st.session_state['last_transaction_data'] = transaction_data
             st.session_state['last_prediction_class'] = prediction_result.get("prediction")
+            st.session_state['last_model_prediction'] = prediction_result.get("prediction") # Stocker la prédiction du modèle
             st.session_state['last_prediction_prob'] = prediction_result.get("probability", 0.0)
             st.session_state['last_prediction_confidence'] = prediction_result.get("confidence", "Non disponible")
         else:
             st.error("❌ Impossible d'obtenir une prédiction de l'API.")
 
-    # Affichage des résultats
+    # Affichage des résultats (inchangé)
     if 'last_prediction_class' in st.session_state and st.session_state.get('last_prediction_class') is not None:
         st.markdown("---")
         st.subheader("Résultat de la prédiction")
 
         prediction_class = st.session_state.get('last_prediction_class')
+        model_pred = st.session_state.get('last_model_prediction')
         prediction_prob = st.session_state.get('last_prediction_prob', 0.0)
         prediction_confidence = st.session_state.get('last_prediction_confidence', "Non disponible")
 
@@ -201,7 +226,7 @@ def show():
         st.info(
             "💡 Remarque : La prédiction se base sur le modèle XGBoost, mais une vérification manuelle peut être nécessaire pour les cas ambigus.")
 
-        # Section Recommandations et Facteurs Clés
+        # Section Recommandations et Facteurs Clés (inchangé)
         st.markdown("---")
         with st.expander("Recommandations et Facteurs Clés"):
             # Données fictives pour l'importance des caractéristiques
@@ -251,25 +276,26 @@ def show():
         st.markdown("---")
         st.subheader("Confirmation manuelle de la transaction")
 
-        if prediction_class == 0:
-            st.markdown("Le modèle a prédit que cette transaction est **normale**. Veuillez confirmer ce résultat.")
-            if st.button("✅ Confirmer comme normale", key="confirm_non_fraud"):
-                feedback_data = st.session_state['last_transaction_data'].copy()
-                feedback_data['Class'] = 0
-                if submit_feedback(feedback_data):
-                    st.success("🎉 Rétroaction enregistrée avec succès : Transaction marquée comme non-fraude.")
-                else:
-                    st.error("❌ Échec de l'enregistrement de la rétroaction.")
+        if prediction_class is not None and model_pred is not None: # S'assurer que les données sont là
+            
+            # 💡 Mise à jour de la logique de feedback pour utiliser la nouvelle fonction
+            # et le nouveau format de l'API AlertIn: (transaction_data, model_pred, user_class)
+            
+            if prediction_class == 0:
+                st.markdown("Le modèle a prédit que cette transaction est **normale**. Veuillez confirmer ce résultat.")
+                if st.button("✅ Confirmer comme normale", key="confirm_non_fraud"):
+                    if submit_feedback(st.session_state['last_transaction_data'], model_pred, 0):
+                        st.success("🎉 Rétroaction enregistrée avec succès : Transaction marquée comme non-fraude.")
+                    else:
+                        st.error("❌ Échec de l'enregistrement de la rétroaction.")
 
-        elif prediction_class == 1:
-            st.markdown("Le modèle a prédit que cette transaction est **frauduleuse**. Veuillez confirmer ce résultat.")
-            if st.button("🚨 Confirmer comme fraude", key="confirm_fraud"):
-                feedback_data = st.session_state['last_transaction_data'].copy()
-                feedback_data['Class'] = 1
-                if submit_feedback(feedback_data):
-                    st.success("🎉 Rétroaction enregistrée avec succès : Transaction marquée comme fraude.")
-                else:
-                    st.error("❌ Échec de l'enregistrement de la rétroaction.")
+            elif prediction_class == 1:
+                st.markdown("Le modèle a prédit que cette transaction est **frauduleuse**. Veuillez confirmer ce résultat.")
+                if st.button("🚨 Confirmer comme fraude", key="confirm_fraud"):
+                    if submit_feedback(st.session_state['last_transaction_data'], model_pred, 1):
+                        st.success("🎉 Rétroaction enregistrée avec succès : Transaction marquée comme fraude.")
+                    else:
+                        st.error("❌ Échec de l'enregistrement de la rétroaction.")
 
 if __name__ == "__main__":
     show()

@@ -15,6 +15,13 @@ check_authentication()
 
 # URL de l'API FastAPI
 API_URL = "https://lamine-th0101-detection-fraud-bancaire-api.hf.space"
+# 🚨 NOUVEL ENDPOINT DÉDIÉ AUX ALERTES ET AU FEEDBACK
+ALERT_URL = f"{API_URL}/alert"
+# L'endpoint de récupération d'alertes reste le même
+GET_ALERTS_URL = f"{API_URL}/alerts"
+# L'endpoint des données historiques reste le même
+HISTORICAL_DATA_URL = f"{API_URL}/historical_data"
+
 
 @st.cache_data(ttl=5)
 def get_model_alerts():
@@ -23,7 +30,8 @@ def get_model_alerts():
     La fonction est mise en cache pour 5 secondes pour un rafraîchissement régulier.
     """
     try:
-        response = requests.get(f"{API_URL}/alerts", timeout=10)
+        # 🚨 Utilisation de la variable GET_ALERTS_URL
+        response = requests.get(GET_ALERTS_URL, timeout=10)
         if response.status_code == 200:
             alerts_data = response.json()['alerts']
             if not alerts_data:
@@ -41,14 +49,14 @@ def get_model_alerts():
 @st.cache_data
 def get_historical_data():
     """
-    Récupère des données historiques pour la visualisation. Tente d'abord de se connecter
-    à l'API, puis charge le fichier local en cas d'échec.
+    Récupère des données historiques pour la visualisation.
     """
     file_path = "data/creditcard_cleaned.csv"
 
     with st.spinner("Chargement des données historiques..."):
         try:
-            response = requests.get(f"{API_URL}/historical_data", timeout=5)
+            # 🚨 Utilisation de la variable HISTORICAL_DATA_URL
+            response = requests.get(HISTORICAL_DATA_URL, timeout=5)
             if response.status_code == 200:
                 return pd.DataFrame(response.json()['data'])
         except (requests.exceptions.RequestException, requests.exceptions.Timeout):
@@ -63,7 +71,7 @@ def get_historical_data():
 def find_most_anomalous_feature(current_transaction, historical_df):
     """
     Trouve la caractéristique (V1-V28) qui est le plus en dehors de la distribution normale.
-    Retourne la caractéristique et son Z-score.
+    Retourne la caractéristique et son Z-score. (Logique inchangée)
     """
     if historical_df.empty:
         return 'V1', 0.0
@@ -82,12 +90,12 @@ def find_most_anomalous_feature(current_transaction, historical_df):
 
     if anomalies:
         most_anomalous_feature = max(anomalies, key=anomalies.get)
-        return most_anomalous_feature, anomalies[most_anomalous_feature]
+        return most_anomalous_feature, anomalies[most_anomalies_feature]
     else:
         return 'V1', 0.0
 
 def create_pca_plot(df, current_transaction, feature):
-    """Crée un graphique de distribution pour une valeur PCA."""
+    """Crée un graphique de distribution pour une valeur PCA. (Logique inchangée)"""
     fig = go.Figure()
 
     if df.empty:
@@ -144,33 +152,45 @@ def create_pca_plot(df, current_transaction, feature):
 
 def submit_feedback(feedback_data):
     """
-    Soumet une rétroaction à l'API.
+    Soumet une rétroaction à l'API en utilisant le nouvel endpoint /alert.
     """
     try:
-        response = requests.post(f"{API_URL}/feedback", json=feedback_data, timeout=10)
+        # 🚨 Utilisation de l'endpoint /alert pour le feedback
+        response = requests.post(ALERT_URL, json=feedback_data, timeout=10)
         if response.status_code == 200:
             return True
         else:
-            st.error(f"Erreur lors de l'envoi de la rétroaction: {response.status_code}")
+            st.error(f"Erreur lors de l'envoi de la rétroaction: {response.status_code} - {response.text}")
             return False
     except requests.exceptions.RequestException as e:
         st.error(f"Erreur de connexion à l'API: {e}")
         return False
 
-def send_feedback(transaction_id, transaction_data, true_class, message):
+def send_feedback(transaction_id, transaction_data_series, model_pred: int, true_class: int, message: str):
     """
-    Envoie la rétroaction à l'API et affiche un message de confirmation personnalisé.
+    Construit le corps de la requête AlertIn et envoie la rétroaction à l'API.
     """
     try:
-        feedback_data = transaction_data.to_dict()
-        feedback_data['Class'] = true_class
-
+        # Convertir les données de la transaction du format Series au dictionnaire float
+        transaction_dict = transaction_data_series.to_dict()
+        
+        # Le endpoint /alert nécessite que toutes les valeurs numériques soient des floats
+        # et que le corps soit au format AlertIn.
+        feedback_data = {
+            "transaction": {k: float(v) for k, v in transaction_dict.items()},
+            "model_prediction": model_pred,
+            "user_feedback": true_class
+        }
+        
         if submit_feedback(feedback_data):
             st.success(message)
             time.sleep(2)
+            # Suppression de l'alerte de la file d'attente après confirmation réussie
             if 'alerts_queue' in st.session_state and st.session_state.alerts_queue:
                 st.session_state.alerts_queue.pop(0)
-            st.cache_data.clear()
+            # 💡 Mise à jour : Il est plus sûr d'invalider le cache de la fonction get_model_alerts()
+            # pour forcer le rafraîchissement des alertes disponibles
+            get_model_alerts.clear() 
             st.rerun()
         else:
             st.error("Échec de l'enregistrement de la rétroaction")
@@ -188,7 +208,7 @@ def show():
         "Bienvenue dans votre file d'attente d'alertes. Validez les transactions suspectes une par une pour les retirer de la liste.")
     st.markdown("---")
 
-    # Test de connexion à l'API
+    # Test de connexion à l'API (inchangé)
     try:
         health_response = requests.get(f"{API_URL}/health", timeout=5)
         if health_response.status_code != 200:
@@ -199,6 +219,17 @@ def show():
     # --- Gestion de la file d'attente ---
     if 'alerts_queue' not in st.session_state:
         alerts_df = get_model_alerts()
+        # S'assurer que les colonnes 'id', 'Class', 'prediction_score' sont présentes avant de convertir en dict
+        # Même si l'API ne renvoie pas 'Class', le front-end le gère
+        required_cols = alerts_df.columns.tolist() 
+        if 'id' not in required_cols:
+             alerts_df['id'] = alerts_df.index.astype(str)
+             
+        # Dans un scénario réel, l'API devrait retourner la 'model_prediction' et le 'prediction_score'.
+        # Nous utilisons la valeur par défaut pour l'exemple.
+        if 'model_prediction' not in required_cols:
+             alerts_df['model_prediction'] = 1 # Par défaut, une alerte est une prédiction de fraude
+        
         st.session_state.alerts_queue = alerts_df.to_dict('records')
         st.session_state.initial_alerts_count = len(st.session_state.alerts_queue)
 
@@ -221,8 +252,11 @@ def show():
 
         # Déterminer la caractéristique la plus anormale (pour le défaut et l'explication)
         most_anomalous_feature, z_score = find_most_anomalous_feature(current_transaction, historical_df)
-        model_verdict = 1 if z_score > 3 else 0  # Maintien de la logique de verdict
-
+        
+        # Le verdict du modèle est pris directement de la donnée d'alerte si disponible,
+        # sinon on utilise une heuristique ou la valeur par défaut (1=Fraude)
+        model_verdict = current_transaction.get('model_prediction', 1) 
+        
         # --- Affichage des informations clés ---
         st.markdown('<div class="card">', unsafe_allow_html=True)
 
@@ -235,31 +269,29 @@ def show():
 
         with col_info_3:
             # Afficher l'explication du modèle
-            if model_verdict == 1:
+            if model_verdict == 1: # Utilisation du verdict du modèle
                 st.markdown(f"""
                     <div class='fraud-alert'>
                         <b>Verdict Modèle : SUSPECTÉ DE FRAUDE</b><br>
-                        Raison : {most_anomalous_feature} (Z-score: {z_score:.2f}) est hors norme.
+                        Raison (Heuristique) : {most_anomalous_feature} (Z-score: {z_score:.2f}) est hors norme.
                     </div>
                 """, unsafe_allow_html=True)
             else:
-                st.markdown(f"""
+                 st.markdown(f"""
                     <div class='no-fraud'>
                         <b>Verdict Modèle : NORMAL</b><br>
-                        Raison : {most_anomalous_feature} (Z-score: {z_score:.2f}) est dans la norme.
+                        Raison (Heuristique) : {most_anomalous_feature} (Z-score: {z_score:.2f}) est dans la norme.
                     </div>
                 """, unsafe_allow_html=True)
 
         st.markdown("---")
 
-        # --- Visualisation Interactive ---
+        # --- Visualisation Interactive --- (Logique inchangée)
         st.subheader("Visualisation de l'Anomalie (Analyse de la Distribution)")
 
         if not historical_df.empty:
-            # 1. Sélecteur de Caractéristique
             all_v_features = [f"V{i}" for i in range(1, 29)]
 
-            # Utiliser la caractéristique la plus anormale comme valeur par défaut
             selected_feature = st.selectbox(
                 "Choisir la caractéristique PCA à analyser :",
                 options=all_v_features,
@@ -267,32 +299,41 @@ def show():
                 key=f"feature_selector_{current_transaction['id']}"
             )
 
-            # 2. Affichage du Graphique
             create_pca_plot(historical_df, current_transaction, feature=selected_feature)
 
-        # --- Affichage des Valeurs PCA sous forme de Tableau ---
+        # --- Affichage des Valeurs PCA sous forme de Tableau --- (Logique inchangée)
         st.markdown("---")
         with st.expander("Voir toutes les valeurs PCA (pour un examen détaillé)"):
-            v_data = {f"V{i}": current_transaction[f"V{i}"] for i in range(1, 29)}
+            # Exclure les colonnes non-transactionnelles comme 'id' et 'model_prediction'
+            v_data = {k: v for k, v in current_transaction.items() if k.startswith('V') or k in ['Time', 'Amount']}
             v_df = pd.DataFrame(v_data.items(), columns=['Caractéristique', 'Valeur'])
             st.dataframe(v_df.T, use_container_width=True)
 
         st.markdown("---")
 
         # --- Boutons de Rétroaction ---
+        # 🚨 Mise à jour de l'appel de send_feedback
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🚨 Confirmer FRAUDE (Class=1)", key=f"fraud_{current_transaction['id']}",
                          help="Cliquez pour valider la fraude. La transaction est retirée de la file.", type='primary'):
                 with st.spinner("Envoi de la rétroaction..."):
-                    send_feedback(current_transaction['id'], current_transaction.drop('id'), 1,
+                    # 🚨 Passage du model_verdict (la prédiction du modèle) et de la true_class (1)
+                    send_feedback(current_transaction['id'], 
+                                  current_transaction.drop(['id', 'model_prediction'], errors='ignore'), 
+                                  model_verdict, 
+                                  1,
                                   "Rétroaction de *fraude* enregistrée avec succès ! Redirection...")
         with col2:
             if st.button("✅ Confirmer NORMAL (Class=0)", key=f"normal_{current_transaction['id']}",
                          help="Cliquez pour confirmer que la transaction est normale. La transaction est retirée de la file.",
                          type='secondary'):
                 with st.spinner("Envoi de la rétroaction..."):
-                    send_feedback(current_transaction['id'], current_transaction.drop('id'), 0,
+                    # 🚨 Passage du model_verdict (la prédiction du modèle) et de la true_class (0)
+                    send_feedback(current_transaction['id'], 
+                                  current_transaction.drop(['id', 'model_prediction'], errors='ignore'), 
+                                  model_verdict, 
+                                  0,
                                   "Rétroaction de transaction *normale* enregistrée avec succès ! Redirection...")
 
         st.markdown('</div>', unsafe_allow_html=True)
